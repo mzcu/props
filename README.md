@@ -68,6 +68,7 @@ func main() {
 | `props:"secret"` | The value, and everything nested in it, is masked in the report |
 | `props:"env=NAME"` | The field always reads environment variable `NAME` |
 | `props:"env=-"` | The field, and everything nested in it, is never read from the environment |
+| `props:"-"` | The field is not a configuration property: ignored by every source, rule, validation and the report |
 | `yaml:"name"` | The YAML key and report name, as in `yaml.v3` |
 
 YAML keys match field names case-insensitively, so `serviceDiscovery`, `servicediscovery`

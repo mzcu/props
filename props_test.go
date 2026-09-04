@@ -311,3 +311,20 @@ func TestLoad_OptionalFile(t *testing.T) {
 		t.Error("expected an error for a directory")
 	}
 }
+
+func TestLoad_SkippedField(t *testing.T) {
+	t.Setenv("APP_RUNTIME", "from-env")
+	var cfg struct {
+		Name    string
+		Runtime string `props:"-"`
+	}
+	report, err := props.Load(&cfg, props.File(writeYAML(t, "name: x")), props.Env("APP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime != "" || strings.Contains(report.String(), "Runtime") {
+		t.Errorf("a skipped field was loaded or reported: cfg = %+v\n%s", cfg, report)
+	}
+	_, err = props.Load(&cfg, props.File(writeYAML(t, "runtime: x")))
+	assertFieldError(t, err, "runtime", "unknown key")
+}

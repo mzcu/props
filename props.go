@@ -13,6 +13,7 @@
 //	secret     the value is masked in [Report.String]
 //	env=NAME   the field always reads environment variable NAME
 //	env=-      the field is never read from the environment
+//	-          the field is not a configuration property at all
 //
 // YAML keys match field names case-insensitively, or the name given in a yaml
 // tag. With [Env], every field also reads PREFIX_PATH_TO_FIELD, the field path
@@ -332,7 +333,7 @@ func yamlFields(t reflect.Type, into map[string]yamlField) map[string]yamlField 
 	for sf := range t.Fields() {
 		key, seg, inline := yamlName(sf)
 		switch {
-		case !sf.IsExported() || key == "":
+		case !sf.IsExported() || key == "" || skipped(sf):
 		case inline && sf.Type.Kind() == reflect.Struct:
 			yamlFields(sf.Type, into)
 		default:
@@ -479,6 +480,7 @@ func (l *loader) validate() error {
 
 type tags struct {
 	required, secret bool
+	skip             bool   // props:"-": not a property, ignored like an unexported field
 	env              string // variable name, or "-" for none
 }
 
@@ -509,6 +511,8 @@ func parseTags(sf reflect.StructField) (tags, error) {
 		switch name, ok := strings.CutPrefix(strings.TrimSpace(part), "env="); {
 		case ok:
 			t.env = name
+		case part == "-":
+			t.skip = true
 		case part == "required":
 			t.required = true
 		case part == "secret":
@@ -518,6 +522,13 @@ func parseTags(sf reflect.StructField) (tags, error) {
 		}
 	}
 	return t, nil
+}
+
+// skipped reports whether sf is tagged props:"-". A malformed tag is reported
+// by walk, not here.
+func skipped(sf reflect.StructField) bool {
+	t, _ := parseTags(sf)
+	return t.skip
 }
 
 // yamlName returns the key yaml.v3 expects for sf (empty when the field is
@@ -604,7 +615,7 @@ func walk(path string, v reflect.Value, t tags, visit func(string, tags, reflect
 	switch vt := v.Type(); {
 	case isStruct(vt):
 		for sf, fv := range v.Fields() {
-			if !sf.IsExported() {
+			if !sf.IsExported() || skipped(sf) {
 				continue
 			}
 			_, seg, inline := yamlName(sf)
