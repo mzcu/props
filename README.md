@@ -65,30 +65,34 @@ func main() {
 | Tag | Meaning |
 |-----|---------|
 | `props:"required"` | The user must set the field via file or environment |
-| `props:"secret"` | The value is masked in the report |
+| `props:"secret"` | The value, and everything nested in it, is masked in the report |
 | `props:"env=NAME"` | The field always reads environment variable `NAME` |
+| `props:"env=-"` | The field, and everything nested in it, is never read from the environment |
 | `yaml:"name"` | The YAML key and report name, as in `yaml.v3` |
 
 YAML keys match field names case-insensitively, so `serviceDiscovery`, `servicediscovery`
-and `ServiceDiscovery` all match a field named `ServiceDiscovery`. Unknown keys and a
-missing file are errors.
+and `ServiceDiscovery` all match a field named `ServiceDiscovery`. Unknown keys are errors,
+and so is a missing file unless it was given with `props.OptionalFile`.
 
 ## Environment variables
 
 Nothing is read from the environment unless you ask for it. With `props.Env("MYAPP")`,
-every field reads `MYAPP_` followed by its path in upper case with dots replaced by
-underscores, for example `MYAPP_SERVICEDISCOVERY_URL`. `props.Env("")` uses the bare
-path. Fields tagged `env=NAME` read `NAME` regardless.
+every field reads `MYAPP_` followed by its path in `SNAKE_CASE`: words are split at dots
+and at CamelCase boundaries, so `ServiceDiscovery.URL` reads `MYAPP_SERVICE_DISCOVERY_URL`
+and `HTTPClient.APIKey` reads `MYAPP_HTTP_CLIENT_API_KEY`. `props.Env("")` uses the bare
+path. Fields tagged `env=NAME` read `NAME` regardless, and fields tagged `env=-` are
+skipped. Two fields that would read the same variable are an error.
 
 Values are parsed by type: strings, booleans, integers, floats, `time.Duration`, any
 type implementing `encoding.TextUnmarshaler` such as `time.Time` and `netip.Addr`, and
-comma-separated slices of those. Map entries cannot be set from the environment.
+comma-separated slices of those, ignoring empty items. Map entries cannot be set from
+the environment.
 
 ## Derived values
 
-Implement `Rules()` on the config struct, or on any nested struct, to compute fields from
-other fields. Rules run in the order listed, after all sources are loaded, so a rule may
-read the result of an earlier one.
+Implement `Rules()` on the config struct, or on any nested struct, including map values
+and slice elements, to compute fields from other fields. Rules run in the order listed,
+after all sources are loaded, so a rule may read the result of an earlier one.
 
 ```go
 func (c *Config) Rules() []props.Rule {

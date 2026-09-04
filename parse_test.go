@@ -20,7 +20,8 @@ func TestParse(t *testing.T) {
 		{"3.5", float32(3.5)},
 		{"5m30s", 5*time.Minute + 30*time.Second},
 		{"a, b,c", []string{"a", "b", "c"}},
-		{"1,2", []int{1, 2}},
+		{"a, ,b,", []string{"a", "b"}},
+		{"1,2,", []int{1, 2}},
 		{"", []string{}},
 		{"10.0.0.1", netip.MustParseAddr("10.0.0.1")},
 	}
@@ -57,5 +58,24 @@ func TestParse_Errors(t *testing.T) {
 				t.Errorf("expected an error parsing %q into %T", tt.input, tt.typ)
 			}
 		})
+	}
+}
+
+func TestEnvName(t *testing.T) {
+	tests := map[string]string{
+		"ServiceDiscovery.URL": "SERVICE_DISCOVERY_URL",
+		"OtelEndpoint":         "OTEL_ENDPOINT",
+		"HTTPClient.APIKey":    "HTTP_CLIENT_API_KEY",
+		"PodIP":                "POD_IP",
+		"S3Bucket":             "S3_BUCKET",
+		"IPv6":                 "IPV6",
+		"devMode":              "DEV_MODE",
+		"Endpoints.my-api.URL": "ENDPOINTS_MY_API_URL",
+		"List.0.Name":          "LIST_0_NAME",
+	}
+	for path, want := range tests {
+		if got := envName(path); got != want {
+			t.Errorf("envName(%q) = %q, want %q", path, got, want)
+		}
 	}
 }

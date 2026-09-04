@@ -12,10 +12,12 @@
 //	required   the user must set the field via file or environment
 //	secret     the value is masked in [Report.String]
 //	env=NAME   the field always reads environment variable NAME
+//	env=-      the field is never read from the environment
 //
 // YAML keys match field names case-insensitively, or the name given in a yaml
-// tag. With [Env], every field also reads PREFIX_PATH_TO_FIELD, for example
-// APP_SERVICEDISCOVERY_URL. Environment variables override the file.
+// tag. With [Env], every field also reads PREFIX_PATH_TO_FIELD, the field path
+// in SNAKE_CASE, for example APP_SERVICE_DISCOVERY_URL. Environment variables
+// override the file.
 //
 // The configuration struct, and any nested struct, may implement
 //
@@ -36,12 +38,15 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -85,9 +90,16 @@ type Option func(*loader)
 // key in it must name a field.
 func File(path string) Option { return func(l *loader) { l.file = path } }
 
+// OptionalFile is like [File], but a file that does not exist is skipped.
+// Any other problem with the file is still an error.
+func OptionalFile(path string) Option {
+	return func(l *loader) { l.file, l.fileOptional = path, true }
+}
+
 // Env loads values from environment variables named PREFIX_PATH_TO_FIELD: the
-// field path upper-cased with dots replaced by underscores. An empty prefix
-// uses the bare field path.
+// field path in SNAKE_CASE, split at word boundaries, with dots and other
+// punctuation replaced by underscores. An empty prefix uses the bare field
+// path. Two fields reading the same variable is an error.
 func Env(prefix string) Option { return func(l *loader) { l.envPrefix = new(prefix) } }
 
 // Rule computes a field's value from other fields. Rules are declared by a
@@ -199,8 +211,9 @@ func format(v reflect.Value, secret bool) string {
 
 type loader struct {
 	Report
-	file      string
-	envPrefix *string
+	file         string
+	fileOptional bool
+	envPrefix    *string
 }
 
 // Load fills the struct cfg from the given sources, applies its rules and
@@ -230,10 +243,6 @@ func (l *loader) load() error {
 	if err := l.loadEnv(); err != nil {
 		return err
 	}
-	// Indexed after loading so that pointer fields allocated by the file are included.
-	if err := l.index(); err != nil {
-		return err
-	}
 	if err := l.checkRequired(); err != nil {
 		return err
 	}
@@ -245,6 +254,9 @@ func (l *loader) load() error {
 
 func (l *loader) loadFile() error {
 	data, err := os.ReadFile(l.file)
+	if l.fileOptional && errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -332,17 +344,25 @@ func yamlFields(t reflect.Type, into map[string]yamlField) map[string]yamlField 
 }
 
 func (l *loader) loadEnv() error {
+	bound := map[string]string{} // variable name to the field path reading it
 	return walk("", l.cfg, tags{}, func(path string, t tags, v reflect.Value) error {
 		name := t.env
-		if name == "" {
+		switch {
+		case name == "-":
+			return nil
+		case name == "":
 			if l.envPrefix == nil || path == "" || !isLeaf(v) {
 				return nil
 			}
-			name = strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
+			name = envName(path)
 			if *l.envPrefix != "" {
 				name = *l.envPrefix + "_" + name
 			}
 		}
+		if other, ok := bound[name]; ok {
+			return fieldErr(path, "environment variable %s is already read by %s", name, other)
+		}
+		bound[name] = path
 		s, ok := os.LookupEnv(name)
 		if !ok {
 			return nil
@@ -358,15 +378,6 @@ func (l *loader) loadEnv() error {
 	})
 }
 
-func (l *loader) index() error {
-	return walk("", l.cfg, tags{}, func(path string, _ tags, v reflect.Value) error {
-		if v.CanAddr() {
-			l.paths[ptrKey{v.Addr().Pointer(), v.Type()}] = path
-		}
-		return nil
-	})
-}
-
 func (l *loader) checkRequired() error {
 	var errs []error
 	err := walk("", l.cfg, tags{}, func(path string, t tags, _ reflect.Value) error {
@@ -378,17 +389,41 @@ func (l *loader) checkRequired() error {
 	return errors.Join(append(errs, err)...)
 }
 
+// applyRules indexes the field paths, collects the rules of every struct in
+// walk order and applies them. It runs after the sources are loaded so that
+// pointer fields allocated by the file are indexed too.
 func (l *loader) applyRules() error {
 	var rules []Rule
-	err := walk("", l.cfg, tags{}, func(_ string, _ tags, v reflect.Value) error {
-		if v = deref(v); v.IsValid() && v.CanAddr() {
+	var copies []mapCopy
+	var collect func(path string, _ tags, v reflect.Value) error
+	collect = func(path string, _ tags, v reflect.Value) error {
+		if v.CanAddr() {
+			l.paths[ptrKey{v.Addr().Pointer(), v.Type()}] = path
+		}
+		if v = deref(v); !v.IsValid() {
+			return nil
+		}
+		switch t := v.Type(); {
+		case t.Kind() == reflect.Map && t.Elem().Kind() == reflect.Struct && isStruct(t.Elem()):
+			// Map values are not addressable, so their rules point into copies
+			// that are written back once all rules ran.
+			for _, k := range sortedKeys(v) {
+				e := reflect.New(t.Elem()).Elem()
+				e.Set(v.MapIndex(k))
+				if err := walk(join(path, fmt.Sprint(k)), e, tags{}, collect); err != nil {
+					return err
+				}
+				copies = append(copies, mapCopy{v, k, e})
+			}
+			return errSkip
+		case v.CanAddr():
 			if r, ok := v.Addr().Interface().(interface{ Rules() []Rule }); ok {
 				rules = append(rules, r.Rules()...)
 			}
 		}
 		return nil
-	})
-	if err != nil {
+	}
+	if err := walk("", l.cfg, tags{}, collect); err != nil {
 		return err
 	}
 	for _, r := range rules {
@@ -396,7 +431,23 @@ func (l *loader) applyRules() error {
 			return err
 		}
 	}
+	for _, c := range copies {
+		c.m.SetMapIndex(c.k, c.v)
+	}
+	// The copies are garbage now: forget their addresses so that a later
+	// allocation at the same address cannot be mistaken for a field.
+	maps.DeleteFunc(l.paths, func(k ptrKey, _ string) bool {
+		return slices.ContainsFunc(copies, func(c mapCopy) bool { return c.contains(k.addr) })
+	})
 	return nil
+}
+
+// mapCopy is an addressable copy v of the value of m at key k.
+type mapCopy struct{ m, k, v reflect.Value }
+
+func (c mapCopy) contains(addr uintptr) bool {
+	start := c.v.UnsafeAddr()
+	return addr >= start && addr < start+max(c.v.Type().Size(), 1)
 }
 
 func (l *loader) validate() error {
@@ -429,7 +480,28 @@ func (l *loader) validate() error {
 
 type tags struct {
 	required, secret bool
-	env              string
+	env              string // variable name, or "-" for none
+}
+
+// inheritable returns the tags a value passes on to its children: secrecy and
+// exclusion from the environment.
+func (t tags) inheritable() tags {
+	var c tags
+	c.secret = t.secret
+	if t.env == "-" {
+		c.env = "-"
+	}
+	return c
+}
+
+// inherit combines the field's own tags with those of its parent.
+func (t tags) inherit(parent tags) tags {
+	p := parent.inheritable()
+	t.secret = t.secret || p.secret
+	if t.env == "" {
+		t.env = p.env
+	}
+	return t
 }
 
 func parseTags(sf reflect.StructField) (tags, error) {
@@ -471,6 +543,32 @@ func join(path, seg string) string {
 	return path + "." + seg
 }
 
+// envName converts a field path to SNAKE_CASE: a word starts at a dot or other
+// punctuation, at an upper-case letter after a lower-case letter or digit, and
+// at the last of two or more upper-case letters when a lower-case one follows.
+// So ServiceDiscovery.HTTPClient.APIKey becomes SERVICE_DISCOVERY_HTTP_CLIENT_API_KEY,
+// while a single capital as in OAuth or IPv6 does not split.
+func envName(path string) string {
+	var sb strings.Builder
+	runes := []rune(path)
+	upperAt := func(i int) bool { return i >= 0 && unicode.IsUpper(runes[i]) }
+	lowerAt := func(i int) bool { return i < len(runes) && unicode.IsLower(runes[i]) }
+	for i, r := range runes {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			sb.WriteByte('_')
+			continue
+		}
+		if i > 0 && unicode.IsUpper(r) {
+			prev := runes[i-1]
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (upperAt(i-1) && upperAt(i-2) && lowerAt(i+1)) {
+				sb.WriteByte('_')
+			}
+		}
+		sb.WriteRune(unicode.ToUpper(r))
+	}
+	return sb.String()
+}
+
 var textUnmarshaler = reflect.TypeFor[encoding.TextUnmarshaler]()
 
 // isStruct reports whether t (or the type it points to) is a struct that props
@@ -506,18 +604,25 @@ func deref(v reflect.Value) reflect.Value {
 	return v
 }
 
+// errSkip is returned by a visit function to keep walk out of the value's children.
+var errSkip = errors.New("skip")
+
 // walk visits v and then, depth first and in declaration order, every exported
 // field, map value and slice element that is a struct. Inlined fields keep
-// their parent's path.
+// their parent's path, and a secret value's children are secret too.
 func walk(path string, v reflect.Value, t tags, visit func(string, tags, reflect.Value) error) error {
 	if err := visit(path, t, v); err != nil {
+		if err == errSkip {
+			return nil
+		}
 		return err
 	}
 	if v = deref(v); !v.IsValid() {
 		return nil
 	}
-	switch t := v.Type(); {
-	case isStruct(t):
+	inherited := t.inheritable()
+	switch vt := v.Type(); {
+	case isStruct(vt):
 		for sf, fv := range v.Fields() {
 			if !sf.IsExported() {
 				continue
@@ -531,21 +636,20 @@ func walk(path string, v reflect.Value, t tags, visit func(string, tags, reflect
 			if err != nil {
 				return &FieldError{p, err}
 			}
+			ft = ft.inherit(t)
 			if err := walk(p, fv, ft, visit); err != nil {
 				return err
 			}
 		}
-	case t.Kind() == reflect.Map && isStruct(t.Elem()):
-		keys := v.MapKeys()
-		slices.SortFunc(keys, func(a, b reflect.Value) int { return cmp.Compare(fmt.Sprint(a), fmt.Sprint(b)) })
-		for _, k := range keys {
-			if err := walk(join(path, fmt.Sprint(k)), v.MapIndex(k), tags{}, visit); err != nil {
+	case vt.Kind() == reflect.Map && isStruct(vt.Elem()):
+		for _, k := range sortedKeys(v) {
+			if err := walk(join(path, fmt.Sprint(k)), v.MapIndex(k), inherited, visit); err != nil {
 				return err
 			}
 		}
-	case t.Kind() == reflect.Slice && isStruct(t.Elem()):
+	case vt.Kind() == reflect.Slice && isStruct(vt.Elem()):
 		for i := range v.Len() {
-			if err := walk(join(path, strconv.Itoa(i)), v.Index(i), tags{}, visit); err != nil {
+			if err := walk(join(path, strconv.Itoa(i)), v.Index(i), inherited, visit); err != nil {
 				return err
 			}
 		}
@@ -553,10 +657,17 @@ func walk(path string, v reflect.Value, t tags, visit func(string, tags, reflect
 	return nil
 }
 
+// sortedKeys returns the keys of map v ordered by their printed form.
+func sortedKeys(v reflect.Value) []reflect.Value {
+	return slices.SortedFunc(slices.Values(v.MapKeys()), func(a, b reflect.Value) int {
+		return cmp.Compare(fmt.Sprint(a), fmt.Sprint(b))
+	})
+}
+
 var durationType = reflect.TypeFor[time.Duration]()
 
 // parse sets v from its textual form as found in an environment variable.
-// Slices are comma separated.
+// Slices are comma separated; empty items are dropped.
 func parse(v reflect.Value, s string) error {
 	if v.CanAddr() {
 		if u, ok := v.Addr().Interface().(encoding.TextUnmarshaler); ok {
@@ -605,12 +716,14 @@ func parse(v reflect.Value, s string) error {
 		v.SetFloat(f)
 	case reflect.Slice:
 		var parts []string
-		if s != "" {
-			parts = strings.Split(s, ",")
+		for p := range strings.SplitSeq(s, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				parts = append(parts, p)
+			}
 		}
 		out := reflect.MakeSlice(v.Type(), len(parts), len(parts))
 		for i, p := range parts {
-			if err := parse(out.Index(i), strings.TrimSpace(p)); err != nil {
+			if err := parse(out.Index(i), p); err != nil {
 				return err
 			}
 		}

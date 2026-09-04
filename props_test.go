@@ -2,6 +2,7 @@ package props_test
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -200,4 +201,113 @@ func TestReport_SourcePanicsForForeignPointer(t *testing.T) {
 	}()
 	var other string
 	report.Source(&other)
+}
+
+type credentials struct{ User, Password string }
+
+func TestReport_SecretMasksNestedValues(t *testing.T) {
+	cfg := struct {
+		DB     credentials            `props:"secret"`
+		Tokens map[string]credentials `props:"secret"`
+		Public credentials
+	}{
+		DB:     credentials{"root", "hunter2"},
+		Tokens: map[string]credentials{"api": {"svc", "hunter3"}},
+		Public: credentials{"guest", "visible"},
+	}
+	report, err := props.Load(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := report.String()
+	for _, s := range []string{"hunter2", "hunter3", "root", "svc"} {
+		if strings.Contains(got, s) {
+			t.Errorf("String() exposes %q:\n%s", s, got)
+		}
+	}
+	if !strings.Contains(got, `Public.Password: "visible"`) {
+		t.Errorf("String() should not mask untagged fields:\n%s", got)
+	}
+}
+
+type endpoint struct{ Host, Addr string }
+
+func (e *endpoint) Rules() []props.Rule {
+	return []props.Rule{props.Derive(&e.Addr, func() string { return e.Host + ":443" })}
+}
+
+func TestLoad_RulesApplyToMapValues(t *testing.T) {
+	var cfg struct{ Endpoints map[string]endpoint }
+	report, err := props.Load(&cfg, props.File(writeYAML(t, "endpoints: {api: {host: api.example.com}}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Endpoints["api"].Addr; got != "api.example.com:443" {
+		t.Errorf("Endpoints[api].Addr = %q", got)
+	}
+	if !strings.Contains(report.String(), `Endpoints.api.Addr: "api.example.com:443" (derived)`) {
+		t.Errorf("String() =\n%s", report)
+	}
+
+	_, err = props.Load(&cfg, props.File(writeYAML(t, "endpoints: {api: {host: h, addr: user}}")))
+	assertFieldError(t, err, "Endpoints.api.Addr", "cannot be set by the user")
+}
+
+func TestLoad_EnvNamesAreSnakeCase(t *testing.T) {
+	t.Setenv("APP_OTEL_ENDPOINT", "otel:4317")
+	t.Setenv("APP_HTTP_CLIENT_API_KEY", "key")
+	t.Setenv("APP_DEV_MODE", "true")
+	var cfg struct {
+		OtelEndpoint string
+		HTTPClient   struct{ APIKey string }
+		DevMode      bool `yaml:"devMode"`
+	}
+	if _, err := props.Load(&cfg, props.Env("APP")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OtelEndpoint != "otel:4317" || cfg.HTTPClient.APIKey != "key" || !cfg.DevMode {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoad_EnvNameCollision(t *testing.T) {
+	var cfg struct {
+		OtelEndpoint string
+		Otel         struct{ Endpoint string }
+	}
+	_, err := props.Load(&cfg, props.Env("APP"))
+	assertFieldError(t, err, "Otel.Endpoint", "APP_OTEL_ENDPOINT is already read by OtelEndpoint")
+}
+
+func TestLoad_EnvOptOut(t *testing.T) {
+	t.Setenv("APP_EXTRA", "k=v")
+	t.Setenv("APP_INTERNAL_NAME", "x")
+	var cfg struct {
+		Extra    any                   `props:"env=-"`
+		Internal struct{ Name string } `props:"env=-"`
+	}
+	if _, err := props.Load(&cfg, props.Env("APP")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Extra != nil || cfg.Internal.Name != "" {
+		t.Errorf("cfg = %+v, want nothing read from the environment", cfg)
+	}
+}
+
+func TestLoad_OptionalFile(t *testing.T) {
+	t.Setenv("APP_NAME", "from-env")
+	var cfg struct{ Name string }
+	dir := t.TempDir()
+	if _, err := props.Load(&cfg, props.OptionalFile(filepath.Join(dir, "missing.yaml")), props.Env("APP")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "from-env" {
+		t.Errorf("Name = %q, want the env value after skipping a missing file", cfg.Name)
+	}
+	if _, err := props.Load(&cfg, props.OptionalFile(writeYAML(t, "name: from-file"))); err != nil || cfg.Name != "from-file" {
+		t.Errorf("Name = %q, err = %v, want the file to be loaded when present", cfg.Name, err)
+	}
+	if _, err := props.Load(&cfg, props.OptionalFile(dir)); err == nil {
+		t.Error("expected an error for a directory")
+	}
 }
