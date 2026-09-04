@@ -1,0 +1,203 @@
+package props_test
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mzcu/props"
+)
+
+func TestLoad_YAMLKeysMatchCaseInsensitively(t *testing.T) {
+	var cfg struct {
+		DevMode bool   `yaml:"devMode"`
+		Name    string `yaml:"displayName"`
+		Nested  struct{ MaxRetries int }
+	}
+	yaml := "DEVMODE: true\ndisplayname: app\nnested: {maxretries: 3}"
+	report, err := props.Load(&cfg, props.File(writeYAML(t, yaml)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DevMode || cfg.Name != "app" || cfg.Nested.MaxRetries != 3 {
+		t.Errorf("cfg = %+v", cfg)
+	}
+	if got := report.Source(&cfg.DevMode); got != props.SourceFile {
+		t.Errorf("Source(DevMode) = %v, want file for a tagged field", got)
+	}
+	if !strings.Contains(report.String(), "devMode: true (file)") {
+		t.Errorf("String() should use the yaml tag name:\n%s", report)
+	}
+}
+
+func TestLoad_EnvIsOptIn(t *testing.T) {
+	t.Setenv("NAME", "from-env")
+	t.Setenv("APP_NAME", "from-prefixed-env")
+	t.Setenv("POD_IP", "10.0.0.42")
+
+	var cfg struct {
+		Name  string
+		PodIP string `props:"env=POD_IP"`
+	}
+	if _, err := props.Load(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "" || cfg.PodIP != "10.0.0.42" {
+		t.Errorf("without Env only env= tags apply, got %+v", cfg)
+	}
+
+	if _, err := props.Load(&cfg, props.Env("APP")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "from-prefixed-env" {
+		t.Errorf("Name = %q, want the APP_ prefixed value", cfg.Name)
+	}
+
+	if _, err := props.Load(&cfg, props.Env("")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "from-env" {
+		t.Errorf("Name = %q, want the unprefixed value", cfg.Name)
+	}
+}
+
+func TestLoad_EnvParseError(t *testing.T) {
+	t.Setenv("APP_PORT", "http")
+	var cfg struct{ Port int }
+	_, err := props.Load(&cfg, props.Env("APP"))
+	assertFieldError(t, err, "Port", "APP_PORT")
+}
+
+type chain struct {
+	Base   string
+	Middle string
+	Top    string
+}
+
+func (c *chain) Rules() []props.Rule {
+	return []props.Rule{
+		props.Derive(&c.Middle, func() string { return c.Base + "-middle" }),
+		props.Derive(&c.Top, func() string { return c.Middle + "-top" }),
+	}
+}
+
+func TestLoad_RulesRunInDeclarationOrder(t *testing.T) {
+	cfg := chain{Base: "base"}
+	if _, err := props.Load(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Top != "base-middle-top" {
+		t.Errorf("Top = %q, want base-middle-top", cfg.Top)
+	}
+}
+
+type outer struct {
+	Inner inner
+}
+
+type inner struct {
+	Host string
+	Addr string
+}
+
+func (i *inner) Rules() []props.Rule {
+	return []props.Rule{props.Derive(&i.Addr, func() string { return i.Host + ":80" })}
+}
+
+func TestLoad_NestedStructRules(t *testing.T) {
+	cfg := outer{Inner: inner{Host: "example.com"}}
+	if _, err := props.Load(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Inner.Addr != "example.com:80" {
+		t.Errorf("Inner.Addr = %q", cfg.Inner.Addr)
+	}
+}
+
+type stray struct{ Name string }
+
+func (s *stray) Rules() []props.Rule {
+	var elsewhere string
+	return []props.Rule{props.Derive(&elsewhere, func() string { return "" })}
+}
+
+func TestLoad_RuleTargetOutsideConfig(t *testing.T) {
+	_, err := props.Load(&stray{})
+	if err == nil || !strings.Contains(err.Error(), "does not point into the configuration") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestLoad_PointerAndTextFields(t *testing.T) {
+	t.Setenv("APP_LIMIT", "7")
+	t.Setenv("APP_SINCE", "2024-05-01T00:00:00Z")
+	var cfg struct {
+		Limit *int
+		Since time.Time
+		Rate  *float64
+	}
+	report, err := props.Load(&cfg, props.Env("APP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Limit == nil || *cfg.Limit != 7 || cfg.Since.Year() != 2024 {
+		t.Errorf("cfg = %+v", cfg)
+	}
+	want := "  Limit: 7 (env)\n  Since: 2024-05-01 00:00:00 +0000 UTC (env)\n  Rate: <nil> (default)\n"
+	if got := report.String(); !strings.Contains(got, want) {
+		t.Errorf("String() =\n%s\nwant to contain\n%s", got, want)
+	}
+}
+
+func TestLoad_Errors(t *testing.T) {
+	var notStruct int
+	if _, err := props.Load(&notStruct); err == nil {
+		t.Error("expected an error for a non-struct")
+	}
+	var nilCfg *struct{ Name string }
+	if _, err := props.Load(nilCfg); err == nil {
+		t.Error("expected an error for a nil pointer")
+	}
+
+	var badTag struct {
+		Name string `props:"requried"`
+	}
+	_, err := props.Load(&badTag)
+	assertFieldError(t, err, "Name", `unknown props tag "requried"`)
+}
+
+func TestLoad_MultipleErrorsAreJoined(t *testing.T) {
+	var cfg struct {
+		A string `props:"required"`
+		B string `props:"required"`
+	}
+	_, err := props.Load(&cfg)
+	var count int
+	for _, e := range []string{"A", "B"} {
+		if strings.Contains(err.Error(), e+": required") {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("err = %q, want both fields reported", err)
+	}
+	if _, ok := errors.AsType[*props.FieldError](err); !ok {
+		t.Errorf("err = %T, want to unwrap to *props.FieldError", err)
+	}
+}
+
+func TestReport_SourcePanicsForForeignPointer(t *testing.T) {
+	var cfg struct{ Name string }
+	report, err := props.Load(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("expected a panic")
+		}
+	}()
+	var other string
+	report.Source(&other)
+}
