@@ -2,7 +2,9 @@ package props_test
 
 import (
 	"errors"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,8 +80,8 @@ type chain struct {
 
 func (c *chain) Rules() []props.Rule {
 	return []props.Rule{
-		props.Derive(&c.Middle, func() string { return c.Base + "-middle" }),
-		props.Derive(&c.Top, func() string { return c.Middle + "-top" }),
+		props.Derive(&c.Middle, func() (string, error) { return c.Base + "-middle", nil }),
+		props.Derive(&c.Top, func() (string, error) { return c.Middle + "-top", nil }),
 	}
 }
 
@@ -103,7 +105,7 @@ type inner struct {
 }
 
 func (i *inner) Rules() []props.Rule {
-	return []props.Rule{props.Derive(&i.Addr, func() string { return i.Host + ":80" })}
+	return []props.Rule{props.Derive(&i.Addr, func() (string, error) { return i.Host + ":80", nil })}
 }
 
 func TestLoad_NestedStructRules(t *testing.T) {
@@ -120,7 +122,7 @@ type stray struct{ Name string }
 
 func (s *stray) Rules() []props.Rule {
 	var elsewhere string
-	return []props.Rule{props.Derive(&elsewhere, func() string { return "" })}
+	return []props.Rule{props.Derive(&elsewhere, func() (string, error) { return "", nil })}
 }
 
 func TestLoad_RuleTargetOutsideConfig(t *testing.T) {
@@ -233,7 +235,7 @@ func TestReport_SecretMasksNestedValues(t *testing.T) {
 type endpoint struct{ Host, Addr string }
 
 func (e *endpoint) Rules() []props.Rule {
-	return []props.Rule{props.Derive(&e.Addr, func() string { return e.Host + ":443" })}
+	return []props.Rule{props.Derive(&e.Addr, func() (string, error) { return e.Host + ":443", nil })}
 }
 
 func TestLoad_RulesApplyToMapValues(t *testing.T) {
@@ -327,4 +329,29 @@ func TestLoad_SkippedField(t *testing.T) {
 	}
 	_, err = props.Load(&cfg, props.File(writeYAML(t, "runtime: x")))
 	assertFieldError(t, err, "runtime", "unknown key")
+}
+
+type listener struct {
+	Host string
+	Port int
+	URL  *url.URL
+	Seen bool
+}
+
+func (l *listener) Rules() []props.Rule {
+	return []props.Rule{
+		props.Derive(&l.URL, func() (*url.URL, error) {
+			return url.Parse("http://" + l.Host + ":" + strconv.Itoa(l.Port))
+		}),
+		props.Derive(&l.Seen, func() (bool, error) { return true, nil }),
+	}
+}
+
+func TestLoad_RuleError(t *testing.T) {
+	cfg := listener{Host: "bad host", Port: 80}
+	_, err := props.Load(&cfg)
+	assertFieldError(t, err, "URL", "invalid character")
+	if cfg.Seen {
+		t.Error("rules after a failing one should not run")
+	}
 }

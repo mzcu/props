@@ -64,18 +64,18 @@ type Config struct {
 
 func (c *Config) Rules() []props.Rule {
 	return []props.Rule{
-		props.Default(&c.ServiceDiscovery.URL, func() string {
+		props.Default(&c.ServiceDiscovery.URL, func() (string, error) {
 			return map[Environment]string{
 				EnvDev:     "http://localhost:8500",
 				EnvStaging: "http://consul.staging.internal:8500",
 				EnvProd:    "http://consul.prod.internal:8500",
-			}[c.Environment]
+			}[c.Environment], nil
 		}),
-		props.Derive(&c.ServiceDiscovery.HeartbeatInterval, func() time.Duration {
+		props.Derive(&c.ServiceDiscovery.HeartbeatInterval, func() (time.Duration, error) {
 			if c.DevMode {
-				return time.Second
+				return time.Second, nil
 			}
-			return time.Minute
+			return time.Minute, nil
 		}),
 	}
 }

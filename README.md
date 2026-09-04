@@ -94,21 +94,27 @@ the environment.
 
 Implement `Rules()` on the config struct, or on any nested struct, including map values
 and slice elements, to compute fields from other fields. Rules run in the order listed,
-after all sources are loaded, so a rule may read the result of an earlier one.
+after all sources are loaded, so a rule may read the result of an earlier one. A rule
+that returns an error fails the load with that error prefixed by the field path, and no
+further rules run.
 
 ```go
 func (c *Config) Rules() []props.Rule {
     return []props.Rule{
         // A computed default: the user may override it via file or environment.
-        props.Default(&c.ServiceDiscovery.URL, func() string {
-            return "https://" + c.Environment + ".example.com/discovery"
+        props.Default(&c.ServiceDiscovery.URL, func() (string, error) {
+            return "https://" + c.Environment + ".example.com/discovery", nil
         }),
         // Always computed: a user-provided value is an error.
-        props.Derive(&c.ServiceDiscovery.HeartbeatInterval, func() time.Duration {
+        props.Derive(&c.ServiceDiscovery.HeartbeatInterval, func() (time.Duration, error) {
             if c.DevMode {
-                return time.Second
+                return time.Second, nil
             }
-            return time.Minute
+            return time.Minute, nil
+        }),
+        // A derivation that can fail.
+        props.Derive(&c.ServiceDiscovery.Endpoint, func() (*url.URL, error) {
+            return url.Parse(c.ServiceDiscovery.URL)
         }),
     }
 }

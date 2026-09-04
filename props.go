@@ -107,31 +107,34 @@ func Env(prefix string) Option { return func(l *loader) { l.envPrefix = new(pref
 //
 //	func (c *Config) Rules() []props.Rule {
 //		return []props.Rule{
-//			props.Derive(&c.Heartbeat, func() time.Duration {
+//			props.Derive(&c.Heartbeat, func() (time.Duration, error) {
 //				if c.DevMode {
-//					return time.Second
+//					return time.Second, nil
 //				}
-//				return time.Minute
+//				return time.Minute, nil
 //			}),
 //		}
 //	}
+//
+// An error returned by a rule fails the load with a [FieldError] for the
+// field, and no further rules run.
 type Rule interface {
 	apply(*Report) error
 }
 
 type rule[T any] struct {
 	ptr      *T
-	fn       func() T
+	fn       func() (T, error)
 	override bool
 }
 
-// Derive sets *ptr to fn() after all sources are loaded. The user cannot set
-// the field: a value from the file or environment is an error.
-func Derive[T any](ptr *T, fn func() T) Rule { return rule[T]{ptr, fn, false} }
+// Derive sets *ptr to the value of fn after all sources are loaded. The user
+// cannot set the field: a value from the file or environment is an error.
+func Derive[T any](ptr *T, fn func() (T, error)) Rule { return rule[T]{ptr, fn, false} }
 
-// Default sets *ptr to fn() unless the user set the field via file or
-// environment. It expresses a default computed from other fields.
-func Default[T any](ptr *T, fn func() T) Rule { return rule[T]{ptr, fn, true} }
+// Default sets *ptr to the value of fn unless the user set the field via file
+// or environment. It expresses a default computed from other fields.
+func Default[T any](ptr *T, fn func() (T, error)) Rule { return rule[T]{ptr, fn, true} }
 
 func (r rule[T]) apply(rep *Report) error {
 	path, ok := rep.pathOf(r.ptr)
@@ -144,7 +147,11 @@ func (r rule[T]) apply(rep *Report) error {
 		}
 		return fieldErr(path, "cannot be set by the user, its value is derived")
 	}
-	*r.ptr = r.fn()
+	v, err := r.fn()
+	if err != nil {
+		return &FieldError{path, err}
+	}
+	*r.ptr = v
 	rep.sources[path] = SourceDerived
 	return nil
 }
