@@ -16,8 +16,8 @@
 //
 // YAML keys match field names case-insensitively, or the name given in a yaml
 // tag. With [Env], every field also reads PREFIX_PATH_TO_FIELD, the field path
-// in SNAKE_CASE, for example APP_SERVICE_DISCOVERY_URL. Environment variables
-// override the file.
+// upper-cased with an underscore for each nesting level, for example
+// APP_SERVICEDISCOVERY_URL. Environment variables override the file.
 //
 // The configuration struct, and any nested struct, may implement
 //
@@ -46,7 +46,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -97,9 +96,9 @@ func OptionalFile(path string) Option {
 }
 
 // Env loads values from environment variables named PREFIX_PATH_TO_FIELD: the
-// field path in SNAKE_CASE, split at word boundaries, with dots and other
-// punctuation replaced by underscores. An empty prefix uses the bare field
-// path. Two fields reading the same variable is an error.
+// field path upper-cased with dots replaced by underscores. Underscores mark
+// nesting only, so field names are never split into words. An empty prefix
+// uses the bare field path. Two fields reading the same variable is an error.
 func Env(prefix string) Option { return func(l *loader) { l.envPrefix = new(prefix) } }
 
 // Rule computes a field's value from other fields. Rules are declared by a
@@ -543,30 +542,11 @@ func join(path, seg string) string {
 	return path + "." + seg
 }
 
-// envName converts a field path to SNAKE_CASE: a word starts at a dot or other
-// punctuation, at an upper-case letter after a lower-case letter or digit, and
-// at the last of two or more upper-case letters when a lower-case one follows.
-// So ServiceDiscovery.HTTPClient.APIKey becomes SERVICE_DISCOVERY_HTTP_CLIENT_API_KEY,
-// while a single capital as in OAuth or IPv6 does not split.
+// envName converts a field path to an environment variable name. Underscores
+// stand for nesting only, so that the name is unambiguous: OtelProperties.Port
+// becomes OTELPROPERTIES_PORT.
 func envName(path string) string {
-	var sb strings.Builder
-	runes := []rune(path)
-	upperAt := func(i int) bool { return i >= 0 && unicode.IsUpper(runes[i]) }
-	lowerAt := func(i int) bool { return i < len(runes) && unicode.IsLower(runes[i]) }
-	for i, r := range runes {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			sb.WriteByte('_')
-			continue
-		}
-		if i > 0 && unicode.IsUpper(r) {
-			prev := runes[i-1]
-			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (upperAt(i-1) && upperAt(i-2) && lowerAt(i+1)) {
-				sb.WriteByte('_')
-			}
-		}
-		sb.WriteRune(unicode.ToUpper(r))
-	}
-	return sb.String()
+	return strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
 }
 
 var textUnmarshaler = reflect.TypeFor[encoding.TextUnmarshaler]()

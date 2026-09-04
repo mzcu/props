@@ -139,9 +139,9 @@ func TestIntegration_LoadFromYAML(t *testing.T) {
 
 func TestIntegration_EnvOverridesFile(t *testing.T) {
 	t.Setenv("APP_ENVIRONMENT", "dev")
-	t.Setenv("APP_SERVICE_DISCOVERY_PASSWORD", "envpassword")
-	t.Setenv("APP_DEV_MODE", "false")
-	t.Setenv("APP_IGNORED_PEERS", "peer3.example.com, peer4.example.com")
+	t.Setenv("APP_SERVICEDISCOVERY_PASSWORD", "envpassword")
+	t.Setenv("APP_DEVMODE", "false")
+	t.Setenv("APP_IGNOREDPEERS", "peer3.example.com, peer4.example.com")
 
 	var cfg Config
 	report, err := props.Load(&cfg, props.File(writeYAML(t, fullYAML)), props.Env("APP"))
@@ -183,7 +183,7 @@ serviceDiscovery:
 }
 
 func TestIntegration_DerivedFieldCannotBeSet(t *testing.T) {
-	t.Setenv("APP_SERVICE_DISCOVERY_HEARTBEAT_INTERVAL", "5s")
+	t.Setenv("APP_SERVICEDISCOVERY_HEARTBEATINTERVAL", "5s")
 	t.Setenv("APP_ENVIRONMENT", "dev")
 
 	var cfg Config

@@ -77,11 +77,12 @@ and so is a missing file unless it was given with `props.OptionalFile`.
 ## Environment variables
 
 Nothing is read from the environment unless you ask for it. With `props.Env("MYAPP")`,
-every field reads `MYAPP_` followed by its path in `SNAKE_CASE`: words are split at dots
-and at CamelCase boundaries, so `ServiceDiscovery.URL` reads `MYAPP_SERVICE_DISCOVERY_URL`
-and `HTTPClient.APIKey` reads `MYAPP_HTTP_CLIENT_API_KEY`. `props.Env("")` uses the bare
-path. Fields tagged `env=NAME` read `NAME` regardless, and fields tagged `env=-` are
-skipped. Two fields that would read the same variable are an error.
+every field reads `MYAPP_` followed by its path in upper case with an underscore for
+each nesting level, for example `MYAPP_SERVICEDISCOVERY_URL`. Underscores mark nesting
+only and field names are never split into words, so `OtelEndpoint` and `Otel.Endpoint`
+stay distinct. `props.Env("")` uses the bare path. Fields tagged `env=NAME` read `NAME`
+regardless, and fields tagged `env=-` are skipped. Two fields that would read the same
+variable are an error.
 
 Values are parsed by type: strings, booleans, integers, floats, `time.Duration`, any
 type implementing `encoding.TextUnmarshaler` such as `time.Time` and `netip.Addr`, and

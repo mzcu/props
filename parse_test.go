@@ -60,22 +60,3 @@ func TestParse_Errors(t *testing.T) {
 		})
 	}
 }
-
-func TestEnvName(t *testing.T) {
-	tests := map[string]string{
-		"ServiceDiscovery.URL": "SERVICE_DISCOVERY_URL",
-		"OtelEndpoint":         "OTEL_ENDPOINT",
-		"HTTPClient.APIKey":    "HTTP_CLIENT_API_KEY",
-		"PodIP":                "POD_IP",
-		"S3Bucket":             "S3_BUCKET",
-		"IPv6":                 "IPV6",
-		"devMode":              "DEV_MODE",
-		"Endpoints.my-api.URL": "ENDPOINTS_MY_API_URL",
-		"List.0.Name":          "LIST_0_NAME",
-	}
-	for path, want := range tests {
-		if got := envName(path); got != want {
-			t.Errorf("envName(%q) = %q, want %q", path, got, want)
-		}
-	}
-}

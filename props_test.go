@@ -253,30 +253,30 @@ func TestLoad_RulesApplyToMapValues(t *testing.T) {
 	assertFieldError(t, err, "Endpoints.api.Addr", "cannot be set by the user")
 }
 
-func TestLoad_EnvNamesAreSnakeCase(t *testing.T) {
-	t.Setenv("APP_OTEL_ENDPOINT", "otel:4317")
-	t.Setenv("APP_HTTP_CLIENT_API_KEY", "key")
-	t.Setenv("APP_DEV_MODE", "true")
+func TestLoad_EnvNamesMarkNestingOnly(t *testing.T) {
+	t.Setenv("APP_OTEL_ENDPOINT", "nested")
+	t.Setenv("APP_OTELENDPOINT", "flat")
+	t.Setenv("APP_HTTPCLIENT_APIKEY", "key")
 	var cfg struct {
 		OtelEndpoint string
+		Otel         struct{ Endpoint string }
 		HTTPClient   struct{ APIKey string }
-		DevMode      bool `yaml:"devMode"`
 	}
 	if _, err := props.Load(&cfg, props.Env("APP")); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OtelEndpoint != "otel:4317" || cfg.HTTPClient.APIKey != "key" || !cfg.DevMode {
+	if cfg.OtelEndpoint != "flat" || cfg.Otel.Endpoint != "nested" || cfg.HTTPClient.APIKey != "key" {
 		t.Errorf("cfg = %+v", cfg)
 	}
 }
 
 func TestLoad_EnvNameCollision(t *testing.T) {
 	var cfg struct {
-		OtelEndpoint string
-		Otel         struct{ Endpoint string }
+		Otel_Port string
+		Otel      struct{ Port string }
 	}
 	_, err := props.Load(&cfg, props.Env("APP"))
-	assertFieldError(t, err, "Otel.Endpoint", "APP_OTEL_ENDPOINT is already read by OtelEndpoint")
+	assertFieldError(t, err, "Otel.Port", "APP_OTEL_PORT is already read by Otel_Port")
 }
 
 func TestLoad_EnvOptOut(t *testing.T) {
